@@ -1,0 +1,216 @@
+name: Scaffold & Build .NET MAUI (Android)
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: "Project name (folder and .csproj name)"
+        required: true
+        default: "HelloMaui"
+      project_path:
+        description: "Relative path where the project folder will be created"
+        required: true
+        default: "src"
+      template:
+        description: "Template: maui or maui-blazor"
+        required: true
+        default: "maui"
+        type: choice
+        options: [ "maui", "maui-blazor" ]
+      target_branch_strategy:
+        description: "Where to push the scaffold commit"
+        required: true
+        default: "new-branch"
+        type: choice
+        options: [ "new-branch", "current-branch" ]
+      overwrite_existing:
+        description: "Overwrite if the target folder already exists?"
+        required: true
+        default: "false"
+        type: choice
+        options: [ "false", "true" ]
+
+permissions:
+  contents: write   # allow commit/push via GITHUB_TOKEN
+
+jobs:
+  scaffold:
+    runs-on: macos-14
+    outputs:
+      target_dir: ${{ steps.scaffold.outputs.target_dir }}
+      branch: ${{ steps.commit.outputs.branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Install MAUI *templates* so `dotnet new maui` is available.
+      # (Template install is lightweight and recommended for scaffolding.) 
+      - name: Install MAUI templates (.NET 8)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet new install Microsoft.Maui.Templates.net8
+          dotnet new --list | grep -E 'MAUI|maui' || {
+            echo "::error::MAUI templates not found after installation"; exit 1; }
+
+      - name: Scaffold project from template
+        id: scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ github.event.inputs.project_name }}"
+          TEMPLATE="${{ github.event.inputs.template }}"
+          BASE_DIR="${{ github.event.inputs.project_path }}"
+          TARGET_DIR="${BASE_DIR}/${APP_NAME}"
+
+          mkdir -p "${BASE_DIR}"
+
+          if [ -d "${TARGET_DIR}" ] && [ "${{ github.event.inputs.overwrite_existing }}" != "true" ]; then
+            echo "::error::Target directory '${TARGET_DIR}' already exists. Set overwrite_existing=true to replace it."
+            exit 2
+          fi
+
+          FORCE_FLAG=""
+          [ "${{ github.event.inputs.overwrite_existing }}" = "true" ] && FORCE_FLAG="--force"
+
+          # Create the MAUI app (targets net8.0-* frameworks).
+          dotnet new "${TEMPLATE}" --framework "net8.0" --name "${APP_NAME}" --output "${TARGET_DIR}" ${FORCE_FLAG}
+
+          # Create a solution and add the project (optional but handy).
+          [ -f "App.sln" ] || dotnet new sln -n "App"
+          dotnet sln "App.sln" add "${TARGET_DIR}/${APP_NAME}.csproj"
+
+          echo "target_dir=${TARGET_DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit scaffolded files
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          TARGET_BRANCH="$CURRENT_BRANCH"
+          if [ "${{ github.event.inputs.target_branch_strategy }}" = "new-branch" ]; then
+            SAFE_NAME="$(echo "${{ github.event.inputs.project_name }}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
+            TARGET_BRANCH="scaffold/maui-${SAFE_NAME}"
+            git checkout -b "$TARGET_BRANCH"
+          fi
+
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(maui): scaffold ${{ github.event.inputs.template }} project '${{ github.event.inputs.project_name }}' [skip ci]"
+            git push origin "$TARGET_BRANCH"
+          fi
+          echo "branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
+
+  build-android:
+    runs-on: macos-14
+    needs: scaffold
+    env:
+      # Optional signing secrets (set in repo settings → Actions → Secrets)
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+      APP_DIR: ${{ needs.scaffold.outputs.target_dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.scaffold.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK (cmdline-tools latest)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses || true
+
+      # Install the MAUI Android workload to enable building/publishing
+      - name: Install MAUI Android workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet workload install maui-android
+          dotnet workload list
+
+      - name: Restore solution
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore "App.sln"
+
+      - name: Build Android Release (unsigned if no secrets)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBLISH_DIR="./publish"
+          mkdir -p "$PUBLISH_DIR"
+
+          CSPROJ="${APP_DIR}/${{ github.event.inputs.project_name }}.csproj"
+
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "Keystore secrets detected — producing a signed release APK"
+            # Avoid newline issues and ensure correct redirection
+            printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+              -p:AndroidKeyStore=true \
+              -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
+              -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
+              -p:AndroidSigningKeyAlias="${KEY_ALIAS}" \
+              -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
+          else
+            echo "No keystore provided — producing an unsigned release APK"
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR"
+          fi
+
+      - name: Verify APK exists (clear error if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_COUNT=$(find ./publish -name "*.apk" | wc -l | tr -d ' ')
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::No .apk found in ./publish after build.
+            Possible causes:
+              • Workload not installed/recognized (check previous step output)
+              • Project doesn’t target net8.0-android
+              • Packaging/AOT issues (try -p:RunAOTCompilation=false)
+            "
+            exit 3
+          fi
+          echo "APK(s):"
+          find ./publish -type f -name "*.apk" -print
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ github.run_number }}
+          path: publish/**/*.apk
