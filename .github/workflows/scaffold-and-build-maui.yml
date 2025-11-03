@@ -212,5 +212,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk-${{ github.run_number }}
-          path: publish/**/*.apk
+          name: android-apk-${{ github.event.inputs.project_name }}
+          path: ./publish/**/*.apk
