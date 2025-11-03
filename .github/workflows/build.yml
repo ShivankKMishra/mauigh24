@@ -53,11 +53,11 @@ jobs:
           dotnet workload install maui-android
           dotnet workload list
 
-      - name: Restore solution
+      - name: Restore (Android-only)
         shell: bash
         run: |
           set -euo pipefail
-          dotnet restore "$SOLUTION_PATH"
+          dotnet restore "$CSPROJ_PATH" -p:TargetFramework=net8.0-android
 
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
