@@ -34,6 +34,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
       - name: Honor global.json (echo SDK version)
         shell: bash
         run: dotnet --info
@@ -61,15 +62,11 @@ jobs:
           dotnet workload install maui-android
           dotnet workload list
 
-      # ✅ Restore only the Android TFM to avoid iOS workload (NETSDK1147)
       - name: Restore (Android-only)
         shell: bash
         run: |
           set -euo pipefail
           dotnet restore "$CSPROJ_PATH" -p:TargetFramework=net8.0-android
-        # dotnet restore can target a specific TFM via MSBuild property. This
-        # prevents the iOS target from triggering NETSDK1147. See docs.
-        # https://learn.microsoft.com/dotnet/core/tools/dotnet-restore
 
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
@@ -87,6 +84,7 @@ jobs:
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
             dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+              -p:TargetFramework=net8.0-android \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -94,7 +92,8 @@ jobs:
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR"
+            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+              -p:TargetFramework=net8.0-android
           fi
 
       - name: Verify and list APK(s)
