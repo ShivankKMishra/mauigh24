@@ -1,32 +1,146 @@
-name: Build Android (GitHub Actions)
+name: Scaffold & Build .NET MAUI (Android)
 
 on:
-  push:
-    branches: [ main ]
-  release:
-    types: [ created ]
   workflow_dispatch:
+    inputs:
+      project_name:
+        description: "Project name (folder and .csproj name)"
+        required: true
+        default: "HelloMaui"
+      project_path:
+        description: "Relative path where the project folder will be created"
+        required: true
+        default: "src"
+      template:
+        description: "Template: maui or maui-blazor"
+        required: true
+        default: "maui"
+        type: choice
+        options: [ "maui", "maui-blazor" ]
+      target_branch_strategy:
+        description: "Where to push the scaffold commit"
+        required: true
+        default: "new-branch"
+        type: choice
+        options: [ "new-branch", "current-branch" ]
+      overwrite_existing:
+        description: "Overwrite if the target folder already exists?"
+        required: true
+        default: "false"
+        type: choice
+        options: [ "false", "true" ]
 
+# Needed to push the scaffolded code back to the repo
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  scaffold:
+    runs-on: macos-14
+    outputs:
+      branch: ${{ steps.commit.outputs.branch }}
+      app_dir: ${{ steps.scaffold.outputs.app_dir }}
+      csproj_path: ${{ steps.scaffold.outputs.csproj_path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Install only the MAUI *templates* so `dotnet new maui` is available
+      - name: Install MAUI templates (.NET 8)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet new install Microsoft.Maui.Templates.net8
+          dotnet new --list | grep -E 'MAUI|maui' || {
+            echo "::error::MAUI templates not found after installation"; exit 1; }
+
+      - name: Scaffold project
+        id: scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ github.event.inputs.project_name }}"
+          TEMPLATE="${{ github.event.inputs.template }}"
+          BASE_DIR="${{ github.event.inputs.project_path }}"
+          APP_DIR="${BASE_DIR}/${APP_NAME}"
+
+          mkdir -p "${BASE_DIR}"
+
+          if [ -d "${APP_DIR}" ] && [ "${{ github.event.inputs.overwrite_existing }}" != "true" ]; then
+            echo "::error::Target directory '${APP_DIR}' already exists. Set overwrite_existing=true to replace it."
+            exit 2
+          fi
+
+          FORCE_FLAG=""
+          [ "${{ github.event.inputs.overwrite_existing }}" = "true" ] && FORCE_FLAG="--force"
+
+          # Create the MAUI app (targets net8.0 frameworks)
+          dotnet new "${TEMPLATE}" --framework "net8.0" \
+            --name "${APP_NAME}" \
+            --output "${APP_DIR}" \
+            ${FORCE_FLAG}
+
+          # Create a solution (if absent) and add the project
+          [ -f "App.sln" ] || dotnet new sln -n "App"
+          dotnet sln "App.sln" add "${APP_DIR}/${APP_NAME}.csproj"
+
+          echo "app_dir=${APP_DIR}" >> "$GITHUB_OUTPUT"
+          echo "csproj_path=${APP_DIR}/${APP_NAME}.csproj" >> "$GITHUB_OUTPUT"
+
+      - name: Commit scaffolded files
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          TARGET_BRANCH="$CURRENT_BRANCH"
+          if [ "${{ github.event.inputs.target_branch_strategy }}" = "new-branch" ]; then
+            SAFE_NAME="$(echo "${{ github.event.inputs.project_name }}" \
+              | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
+            TARGET_BRANCH="scaffold/maui-${SAFE_NAME}"
+            git checkout -b "$TARGET_BRANCH"
+          fi
+
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            # [skip ci] avoids re-triggering workflows on this commit
+            git commit -m "chore(maui): scaffold ${{ github.event.inputs.template }} project '${{ github.event.inputs.project_name }}' [skip ci]"
+            git push origin "$TARGET_BRANCH"
+          fi
+
+          echo "branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
+
   build-android:
     runs-on: macos-14
+    needs: scaffold
     timeout-minutes: 120
-
     env:
-      # Optional signing secrets (leave empty for unsigned builds)
+      # Optional signing secrets (add in repo Settings → Secrets and variables → Actions)
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
-      - name: Checkout
+      - name: Checkout (scaffolded branch)
         uses: actions/checkout@v4
-
-      - name: Setup .NET SDK 8
+        with:
+          ref: ${{ needs.scaffold.outputs.branch }}
+          fetch-depth: 0
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -47,6 +161,7 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
+      # Install workload needed to build/publish Android
       - name: Install MAUI Android workload
         shell: bash
         run: |
@@ -54,70 +169,21 @@ jobs:
           dotnet workload install maui-android
           dotnet workload list
 
-      - name: Show dotnet info
-        shell: bash
-        run: dotnet --info
-
-      # --- Detect restore target (.sln or .csproj) and a MAUI Android project for publish ---
-      - name: Detect solution/project paths
-        id: detect
+      - name: Restore solution
         shell: bash
         run: |
           set -euo pipefail
+          dotnet restore "App.sln"
 
-          # Find a solution first (preferred for restore)
-          SOLUTION="$(ls -1 *.sln 2>/dev/null | head -n1 || true)"
-
-          # Find any csproj near the root (fallback for restore)
-          ROOT_CSPROJ="$(find . -maxdepth 2 -type f -name '*.csproj' | head -n1 || true)"
-
-          # Find a MAUI Android project to publish
-          # Heuristics: UseMaui=true AND net8.0-android in TargetFrameworks/TargetFramework
-          MAUI_ANDROID_CSPROJ="$(
-            grep -rl "<UseMaui>true</UseMaui>" --include="*.csproj" . \
-            | xargs -I{} sh -c 'grep -q "net8.0-android" "{}" && echo "{}"' \
-            | head -n1 || true
-          )"
-
-          if [ -z "$SOLUTION" ] && [ -z "$ROOT_CSPROJ" ]; then
-            echo "::error::No .sln or .csproj found at repo root or immediate subfolders."
-            echo "Add your solution/project, or tell me its path to hardcode in the workflow."
-            exit 2
-          fi
-
-          if [ -z "$MAUI_ANDROID_CSPROJ" ]; then
-            # As a fallback, pick a csproj that references net8.0-android
-            MAUI_ANDROID_CSPROJ="$(
-              grep -rl "net8.0-android" --include="*.csproj" . | head -n1 || true
-            )"
-          fi
-
-          if [ -z "$MAUI_ANDROID_CSPROJ" ]; then
-            echo "::error::No MAUI Android project (.csproj with net8.0-android) found."
-            echo "Ensure your project targets net8.0-android and contains <UseMaui>true</UseMaui>."
-            exit 3
-          fi
-
-          # Export detection results
-          echo "RESTORE_TARGET=${SOLUTION:-$ROOT_CSPROJ}"            >> "$GITHUB_ENV"
-          echo "PUBLISH_PROJECT=${MAUI_ANDROID_CSPROJ}"              >> "$GITHUB_ENV"
-          echo "Detected restore target: ${SOLUTION:-$ROOT_CSPROJ}"
-          echo "Detected MAUI Android project: ${MAUI_ANDROID_CSPROJ}"
-
-      - name: Restore dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Restoring: $RESTORE_TARGET"
-          dotnet restore "$RESTORE_TARGET"
-
-      # Derive KEYSTORE_PATH from RUNNER_TEMP and export it for subsequent steps
+      # Safely derive KEYSTORE_PATH from RUNNER_TEMP (no runner.temp expression issues)
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
         run: echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
       - name: Build and publish APK
         shell: bash
+        env:
+          CSPROJ: ${{ needs.scaffold.outputs.csproj_path }}
         run: |
           set -euo pipefail
           PUBLISH_DIR=./publish
@@ -125,10 +191,10 @@ jobs:
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Keystore secrets detected — producing a signed release APK"
-            # Use printf to avoid newline; use real '>' redirection
+            # Use printf to avoid newline; use real '>' redirection (no HTML &gt;)
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
-            dotnet publish "$PUBLISH_PROJECT" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -136,9 +202,10 @@ jobs:
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish "$PUBLISH_PROJECT" -f net8.0-android -c Release -o "$PUBLISH_DIR"
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR"
           fi
-      - name: Verify and list publish artifacts
+
+      - name: Verify and list APK(s)
         shell: bash
         run: |
           set -euo pipefail
