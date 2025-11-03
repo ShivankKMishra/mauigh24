@@ -30,7 +30,6 @@ on:
         type: choice
         options: [ "false", "true" ]
 
-# Needed to push scaffolded code back to the repo
 permissions:
   contents: write
 
@@ -51,9 +50,26 @@ jobs:
       - name: Setup .NET 8 SDK (macOS)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '8.0.x'   # install 8.x
+      # Pin the SDK to 8.x so CLI won't pick 9.x if present on the runner
+      - name: Pin SDK to .NET 8 (global.json)
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(dotnet --version)  # should be 8.x from setup-dotnet
+          cat > global.json <<JSON
+          {
+            "sdk": {
+              "version": "$V",
+              "rollForward": "latestFeature"
+            }
+          }
+          JSON
+        # global.json makes the CLI use the specified SDK version in CI. 
+        # (Without it, the latest installed SDK may be used.)  See docs.
+        # https://learn.microsoft.com/dotnet/core/tools/global-json
+        # https://github.com/actions/setup-dotnet (warning about latest SDK)
 
-      # Install MAUI templates so `dotnet new maui` works without heavy workloads
       - name: Install MAUI templates (.NET 8)
         shell: bash
         run: |
@@ -82,13 +98,11 @@ jobs:
           FORCE_FLAG=""
           [ "${{ github.event.inputs.overwrite_existing }}" = "true" ] && FORCE_FLAG="--force"
 
-          # Create the MAUI app (targets net8.0)
           dotnet new "${TEMPLATE}" --framework "net8.0" \
             --name "${APP_NAME}" \
             --output "${APP_DIR}" \
             ${FORCE_FLAG}
 
-          # Create a solution (if absent) and add the project
           [ -f "App.sln" ] || dotnet new sln -n "App"
           dotnet sln "App.sln" add "${APP_DIR}/${APP_NAME}.csproj"
 
@@ -115,7 +129,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            # [skip ci] avoids re-trigger loops
             git commit -m "chore(maui): scaffold ${{ github.event.inputs.template }} project '${{ github.event.inputs.project_name }}' [skip ci]"
             git push origin "$TARGET_BRANCH"
           fi
@@ -126,9 +139,7 @@ jobs:
     runs-on: macos-14
     needs: scaffold
     timeout-minutes: 120
-
     env:
-      # Optional signing secrets (add in repo Settings → Secrets and variables → Actions)
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -145,6 +156,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Honor global.json (echo SDK version)
+        shell: bash
+        run: dotnet --info
 
       - name: Setup Java 17 (Temurin)
         uses: actions/setup-java@v4
@@ -162,7 +176,6 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
-      # Install workload needed to build/publish Android
       - name: Install MAUI Android workload
         shell: bash
         run: |
@@ -170,13 +183,18 @@ jobs:
           dotnet workload install maui-android
           dotnet workload list
 
-      - name: Restore solution
+      # ✅ Restore only the Android TFM to avoid iOS workload (NETSDK1147)
+      - name: Restore (Android-only)
         shell: bash
+        env:
+          CSPROJ: ${{ needs.scaffold.outputs.csproj_path }}
         run: |
           set -euo pipefail
-          dotnet restore "App.sln"
+          dotnet restore "$CSPROJ" -p:TargetFramework=net8.0-android
+        # dotnet restore can target a specific TFM via MSBuild property. This
+        # prevents the iOS target from triggering NETSDK1147. See docs.
+        # https://learn.microsoft.com/dotnet/core/tools/dotnet-restore
 
-      # Safely derive KEYSTORE_PATH from RUNNER_TEMP (macOS)
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
         run: echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
