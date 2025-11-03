@@ -73,7 +73,7 @@ jobs:
             # IMPORTANT: use real '>' (no &gt;), and printf to avoid newline
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
-            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+            dotnet publish "$CSPROJ_PATH" --no-restore -f net8.0-android -c Release -o "$PUBLISH_DIR" \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="$KEYSTORE_PATH" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -81,7 +81,7 @@ jobs:
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR"
+            dotnet publish "$CSPROJ_PATH" --no-restore -f net8.0-android -c Release -o "$PUBLISH_DIR"
           fi
 
       - name: List publish artifacts
