@@ -123,7 +123,7 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-      KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+      KEYSTORE_PATH: ${{ env.RUNNER_TEMP }}/release.keystore
       APP_DIR: ${{ needs.scaffold.outputs.target_dir }}
     steps:
       - name: Checkout
