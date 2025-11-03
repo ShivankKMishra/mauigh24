@@ -19,23 +19,34 @@ jobs:
   build-android:
     runs-on: macos-14
     timeout-minutes: 120
+
     env:
+      # Make CI explicit so you can optionally condition TFMs in the .csproj if desired.
+      CI: true
+
+      # Signing inputs (optional). If not provided, we produce an unsigned APK.
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      # Path to the csproj (derived from dispatch inputs)
       CSPROJ_PATH: ${{ github.event.inputs.project_path }}/${{ github.event.inputs.project_name }}/${{ github.event.inputs.project_name }}.csproj
+
+      # Quiet workload notifications
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFICATION: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8 SDK (macOS)
+      # Pin SDK to a specific .NET 8 version to avoid .NET 9 picking (which is stricter).
+      - name: Setup .NET SDK (8.0.403)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '8.0.403'
 
-      - name: Honor global.json (echo SDK version)
+      - name: Show dotnet info
         shell: bash
         run: dotnet --info
 
@@ -55,6 +66,7 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
+      # Install only the Android workload; we'll skip other TFMs via SkipInvalidConfigurations.
       - name: Install MAUI Android workload
         shell: bash
         run: |
@@ -66,7 +78,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dotnet restore "$CSPROJ_PATH" -p:TargetFramework=net8.0-android
+          dotnet restore "$CSPROJ_PATH" \
+            -p:TargetFrameworks=net8.0-android \
+            -p:SkipInvalidConfigurations=true
 
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
@@ -74,6 +88,10 @@ jobs:
 
       - name: Build and publish APK (signed if secrets provided)
         shell: bash
+        env:
+          # Pass through for the Python decode step
+          KEYSTORE_BASE64: ${{ env.KEYSTORE_BASE64 }}
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
         run: |
           set -euo pipefail
           PUBLISH_DIR=./publish
@@ -81,10 +99,22 @@ jobs:
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Keystore secrets detected — producing a signed release APK"
-            printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
+            # Portable keystore decode using Python (macOS base64 flags vary).
+            python3 - <<'PY'
+import base64, os, sys
+b64 = os.environ.get('KEYSTORE_BASE64', '')
+path = os.environ.get('KEYSTORE_PATH', '')
+if not b64 or not path:
+    sys.exit("Missing KEYSTORE_BASE64 or KEYSTORE_PATH")
+with open(path, 'wb') as f:
+    f.write(base64.b64decode(b64))
+print(f"Wrote keystore to: {path}")
+PY
             dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
-              -p:TargetFramework=net8.0-android \
+              -p:TargetFrameworks=net8.0-android \
+              -p:SkipInvalidConfigurations=true \
+              -p:AndroidPackageFormat=apk \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -93,7 +123,9 @@ jobs:
           else
             echo "No keystore provided — producing an unsigned release APK"
             dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
-              -p:TargetFramework=net8.0-android
+              -p:TargetFrameworks=net8.0-android \
+              -p:SkipInvalidConfigurations=true \
+              -p:AndroidPackageFormat=apk
           fi
 
       - name: Verify and list APK(s)
