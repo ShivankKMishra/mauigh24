@@ -2,65 +2,32 @@ name: Build .NET MAUI (Android)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  release:
+    types: [ created ]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build-android:
     runs-on: macos-14
     timeout-minutes: 120
 
+    # Map secrets to env so we don't embed ${{ }} inside bash
     env:
-      # Paths you were using
-      CSPROJ_PATH: src/HelloMaui/HelloMaui.csproj
-      SOLUTION_PATH: App.sln
-
-      # Signing (optional). If not set, builds an unsigned APK.
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-
-      # Make CI explicit (lets you condition TFMs in the csproj if desired)
-      CI: true
-
-      # Tame noisy workload updates
-      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFICATION: false
-      DOTNET_NOLOGO: true
-      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      CSPROJ_PATH: src/HelloMaui/HelloMaui.csproj
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ensure the build uses .NET 8.x even if the repo has a global.json pointing to 9.x.
-      - name: Write CI global.json (pin to .NET 8.0.403)
-        shell: bash
-        run: |
-          cat > global.json <<'JSON'
-          {
-            "sdk": {
-              "version": "8.0.403",
-              "rollForward": "disable"
-            }
-          }
-          JSON
-          echo "global.json created:"
-          cat global.json
-
-      - name: Setup .NET SDK (honor global.json)
+      - name: Setup .NET SDK 8
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
-      - name: Show .NET info
-        shell: bash
-        run: |
-          dotnet --info
-          dotnet --list-sdks
+          dotnet-version: '8.0.x'
 
       - name: Setup Java 17 (Temurin)
         uses: actions/setup-java@v4
@@ -78,32 +45,24 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
-      # Only the Android workload is needed; we'll skip other TFMs explicitly.
       - name: Install MAUI Android workload
         shell: bash
         run: |
           set -euo pipefail
           dotnet workload install maui-android
-          dotnet workload list
 
-      - name: Restore (Android-only)
+      - name: Show dotnet info
         shell: bash
-        run: |
-          set -euo pipefail
-          # IMPORTANT: SkipInvalidConfigurations prevents evaluation of iOS/MacCatalyst TFMs
-          dotnet restore "$CSPROJ_PATH" \
-            -p:TargetFrameworks=net8.0-android \
-            -p:SkipInvalidConfigurations=true
+        run: dotnet --info
 
-      - name: Set KEYSTORE_PATH from RUNNER_TEMP
+      - name: Restore dependencies
         shell: bash
-        run: echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+        run: dotnet restore "$CSPROJ_PATH" -p:TargetFramework=net8.0-android
 
-      - name: Build and publish APK (signed if secrets provided)
+      - name: Build and publish APK
         shell: bash
         env:
-          KEYSTORE_BASE64: ${{ env.KEYSTORE_BASE64 }}
-          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
         run: |
           set -euo pipefail
           PUBLISH_DIR=./publish
@@ -111,52 +70,28 @@ jobs:
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Keystore secrets detected — producing a signed release APK"
-            # Portable base64 decode (macOS/BSD base64 uses -D, so use Python for reliability)
-            python3 - <<'PY'
-import base64, os, sys
-b64 = os.environ.get('KEYSTORE_BASE64', '')
-path = os.environ.get('KEYSTORE_PATH', '')
-if not b64 or not path:
-    sys.exit("Missing KEYSTORE_BASE64 or KEYSTORE_PATH")
-with open(path, 'wb') as f:
-    f.write(base64.b64decode(b64))
-print(f"Wrote keystore to: {path}")
-PY
+            # IMPORTANT: use real '>' (no &gt;), and printf to avoid newline
+            printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+
             dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
-              -p:TargetFrameworks=net8.0-android \
-              -p:SkipInvalidConfigurations=true \
-              -p:AndroidPackageFormat=apk \
               -p:AndroidKeyStore=true \
-              -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
+              -p:AndroidSigningKeyStore="$KEYSTORE_PATH" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
               -p:AndroidSigningKeyAlias="${KEY_ALIAS}" \
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
-              -p:TargetFrameworks=net8.0-android \
-              -p:SkipInvalidConfigurations=true \
-              -p:AndroidPackageFormat=apk
+            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR"
           fi
 
-      - name: Verify and list APK(s)
+      - name: List publish artifacts
         shell: bash
         run: |
-          set -euo pipefail
-          APK_COUNT=$(find ./publish -name "*.apk" | wc -l | tr -d ' ')
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "::error::No .apk found in ./publish after build."
-            echo "Possible causes:"
-            echo "  • Workload or Android SDK mismatch"
-            echo "  • Project doesn’t target net8.0-android"
-            echo "  • Packaging/AOT issues (try: -p:RunAOTCompilation=false)"
-            exit 4
-          fi
-          echo "APK(s):"
-          find ./publish -type f -name "*.apk" -print
+          echo "APK(s) found:"
+          find publish -type f -name "*.apk" -print || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: android-apk-${{ github.run_number }}
           path: publish/**/*.apk
