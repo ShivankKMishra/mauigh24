@@ -123,7 +123,6 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-      KEYSTORE_PATH: ${{ env.RUNNER_TEMP }}/release.keystore
       APP_DIR: ${{ needs.scaffold.outputs.target_dir }}
     steps:
       - name: Checkout
@@ -173,6 +172,7 @@ jobs:
           set -euo pipefail
           PUBLISH_DIR="./publish"
           mkdir -p "$PUBLISH_DIR"
+          KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
 
           CSPROJ="${APP_DIR}/${{ github.event.inputs.project_name }}.csproj"
 
