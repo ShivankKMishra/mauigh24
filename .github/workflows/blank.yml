@@ -7,7 +7,6 @@ on:
     types: [ created ]
   workflow_dispatch:
 
-# Allow uploading artifacts; not pushing code here, so contents:write is optional
 permissions:
   contents: read
 
@@ -16,8 +15,8 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 120
 
-    # Map secrets to environment variables once, so we don't embed ${{ secrets… }} inside bash.
     env:
+      # Optional signing secrets (leave empty for unsigned builds)
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -59,16 +58,64 @@ jobs:
         shell: bash
         run: dotnet --info
 
+      # --- Detect restore target (.sln or .csproj) and a MAUI Android project for publish ---
+      - name: Detect solution/project paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Find a solution first (preferred for restore)
+          SOLUTION="$(ls -1 *.sln 2>/dev/null | head -n1 || true)"
+
+          # Find any csproj near the root (fallback for restore)
+          ROOT_CSPROJ="$(find . -maxdepth 2 -type f -name '*.csproj' | head -n1 || true)"
+
+          # Find a MAUI Android project to publish
+          # Heuristics: UseMaui=true AND net8.0-android in TargetFrameworks/TargetFramework
+          MAUI_ANDROID_CSPROJ="$(
+            grep -rl "<UseMaui>true</UseMaui>" --include="*.csproj" . \
+            | xargs -I{} sh -c 'grep -q "net8.0-android" "{}" && echo "{}"' \
+            | head -n1 || true
+          )"
+
+          if [ -z "$SOLUTION" ] && [ -z "$ROOT_CSPROJ" ]; then
+            echo "::error::No .sln or .csproj found at repo root or immediate subfolders."
+            echo "Add your solution/project, or tell me its path to hardcode in the workflow."
+            exit 2
+          fi
+
+          if [ -z "$MAUI_ANDROID_CSPROJ" ]; then
+            # As a fallback, pick a csproj that references net8.0-android
+            MAUI_ANDROID_CSPROJ="$(
+              grep -rl "net8.0-android" --include="*.csproj" . | head -n1 || true
+            )"
+          fi
+
+          if [ -z "$MAUI_ANDROID_CSPROJ" ]; then
+            echo "::error::No MAUI Android project (.csproj with net8.0-android) found."
+            echo "Ensure your project targets net8.0-android and contains <UseMaui>true</UseMaui>."
+            exit 3
+          fi
+
+          # Export detection results
+          echo "RESTORE_TARGET=${SOLUTION:-$ROOT_CSPROJ}"            >> "$GITHUB_ENV"
+          echo "PUBLISH_PROJECT=${MAUI_ANDROID_CSPROJ}"              >> "$GITHUB_ENV"
+          echo "Detected restore target: ${SOLUTION:-$ROOT_CSPROJ}"
+          echo "Detected MAUI Android project: ${MAUI_ANDROID_CSPROJ}"
+
       - name: Restore dependencies
         shell: bash
-        run: dotnet restore
+        run: |
+          set -euo pipefail
+          echo "Restoring: $RESTORE_TARGET"
+          dotnet restore "$RESTORE_TARGET"
 
       # Derive KEYSTORE_PATH from RUNNER_TEMP and export it for subsequent steps
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
         run: echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      # Build & publish an APK (signed if keystore secrets are present)
       - name: Build and publish APK
         shell: bash
         run: |
@@ -78,10 +125,10 @@ jobs:
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Keystore secrets detected — producing a signed release APK"
-            # Use printf to avoid a trailing newline; use real '>' redirection (no HTML &gt;)
+            # Use printf to avoid newline; use real '>' redirection
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
-            dotnet publish ./HelloMaui.csproj -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+            dotnet publish "$PUBLISH_PROJECT" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -89,14 +136,23 @@ jobs:
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish ./HelloMaui.csproj -f net8.0-android -c Release -o "$PUBLISH_DIR"
+            dotnet publish "$PUBLISH_PROJECT" -f net8.0-android -c Release -o "$PUBLISH_DIR"
           fi
-
-      - name: List publish artifacts
+      - name: Verify and list publish artifacts
         shell: bash
         run: |
-          echo "APK(s) found:"
-          find publish -type f -name "*.apk" -print || true
+          set -euo pipefail
+          APK_COUNT=$(find ./publish -name "*.apk" | wc -l | tr -d ' ')
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::No .apk found in ./publish after build."
+            echo "Possible causes:"
+            echo "  • Workload not installed or Android SDK mismatch"
+            echo "  • Project doesn’t target net8.0-android"
+            echo "  • Packaging/AOT issues (try: -p:RunAOTCompilation=false)"
+            exit 4
+          fi
+          echo "APK(s):"
+          find ./publish -type f -name "*.apk" -print
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
