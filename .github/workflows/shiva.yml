@@ -1,4 +1,4 @@
-name: Scaffold & Build .NET MAUI (Android) on macOS
+name: Build .NET MAUI (Android) on macOS
 
 on:
   workflow_dispatch:
@@ -8,149 +8,27 @@ on:
         required: true
         default: "HelloMaui"
       project_path:
-        description: "Relative path where the project folder will be created"
+        description: "Relative path where the project folder is located"
         required: true
         default: "src"
-      template:
-        description: "Template: maui or maui-blazor"
-        required: true
-        default: "maui"
-        type: choice
-        options: [ "maui", "maui-blazor" ]
-      target_branch_strategy:
-        description: "Where to push the scaffold commit"
-        required: true
-        default: "new-branch"
-        type: choice
-        options: [ "new-branch", "current-branch" ]
-      overwrite_existing:
-        description: "Overwrite if the target folder already exists?"
-        required: true
-        default: "false"
-        type: choice
-        options: [ "false", "true" ]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  scaffold:
-    runs-on: macos-14
-    outputs:
-      branch: ${{ steps.commit.outputs.branch }}
-      app_dir: ${{ steps.scaffold.outputs.app_dir }}
-      csproj_path: ${{ steps.scaffold.outputs.csproj_path }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup .NET 8 SDK (macOS)
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'   # install 8.x
-      # Pin the SDK to 8.x so CLI won't pick 9.x if present on the runner
-      - name: Pin SDK to .NET 8 (global.json)
-        shell: bash
-        run: |
-          set -euo pipefail
-          V=$(dotnet --version)  # should be 8.x from setup-dotnet
-          cat > global.json <<JSON
-          {
-            "sdk": {
-              "version": "$V",
-              "rollForward": "latestFeature"
-            }
-          }
-          JSON
-        # global.json makes the CLI use the specified SDK version in CI. 
-        # (Without it, the latest installed SDK may be used.)  See docs.
-        # https://learn.microsoft.com/dotnet/core/tools/global-json
-        # https://github.com/actions/setup-dotnet (warning about latest SDK)
-
-      - name: Install MAUI templates (.NET 8)
-        shell: bash
-        run: |
-          set -euo pipefail
-          dotnet new install Microsoft.Maui.Templates.net8
-          dotnet new --list | grep -E 'MAUI|maui' || {
-            echo "::error::MAUI templates not found after installation"; exit 1; }
-
-      - name: Scaffold project
-        id: scaffold
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_NAME="${{ github.event.inputs.project_name }}"
-          TEMPLATE="${{ github.event.inputs.template }}"
-          BASE_DIR="${{ github.event.inputs.project_path }}"
-          APP_DIR="${BASE_DIR}/${APP_NAME}"
-
-          mkdir -p "${BASE_DIR}"
-
-          if [ -d "${APP_DIR}" ] && [ "${{ github.event.inputs.overwrite_existing }}" != "true" ]; then
-            echo "::error::Target directory '${APP_DIR}' already exists. Set overwrite_existing=true to replace it."
-            exit 2
-          fi
-
-          FORCE_FLAG=""
-          [ "${{ github.event.inputs.overwrite_existing }}" = "true" ] && FORCE_FLAG="--force"
-
-          dotnet new "${TEMPLATE}" --framework "net8.0" \
-            --name "${APP_NAME}" \
-            --output "${APP_DIR}" \
-            ${FORCE_FLAG}
-
-          [ -f "App.sln" ] || dotnet new sln -n "App"
-          dotnet sln "App.sln" add "${APP_DIR}/${APP_NAME}.csproj"
-
-          echo "app_dir=${APP_DIR}" >> "$GITHUB_OUTPUT"
-          echo "csproj_path=${APP_DIR}/${APP_NAME}.csproj" >> "$GITHUB_OUTPUT"
-
-      - name: Commit scaffolded files (to new branch by default)
-        id: commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-          TARGET_BRANCH="$CURRENT_BRANCH"
-          if [ "${{ github.event.inputs.target_branch_strategy }}" = "new-branch" ]; then
-            SAFE_NAME="$(echo "${{ github.event.inputs.project_name }}" \
-              | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
-            TARGET_BRANCH="scaffold/maui-${SAFE_NAME}"
-            git checkout -b "$TARGET_BRANCH"
-          fi
-          git add .
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore(maui): scaffold ${{ github.event.inputs.template }} project '${{ github.event.inputs.project_name }}' [skip ci]"
-            git push origin "$TARGET_BRANCH"
-          fi
-
-          echo "branch=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
-
   build-android:
     runs-on: macos-14
-    needs: scaffold
     timeout-minutes: 120
     env:
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      CSPROJ_PATH: ${{ github.event.inputs.project_path }}/${{ github.event.inputs.project_name }}/${{ github.event.inputs.project_name }}.csproj
 
     steps:
-      - name: Checkout (scaffolded branch)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.scaffold.outputs.branch }}
-          fetch-depth: 0
 
       - name: Setup .NET 8 SDK (macOS)
         uses: actions/setup-dotnet@v4
@@ -186,11 +64,9 @@ jobs:
       # ✅ Restore only the Android TFM to avoid iOS workload (NETSDK1147)
       - name: Restore (Android-only)
         shell: bash
-        env:
-          CSPROJ: ${{ needs.scaffold.outputs.csproj_path }}
         run: |
           set -euo pipefail
-          dotnet restore "$CSPROJ" -p:TargetFramework=net8.0-android
+          dotnet restore "$CSPROJ_PATH" -p:TargetFramework=net8.0-android
         # dotnet restore can target a specific TFM via MSBuild property. This
         # prevents the iOS target from triggering NETSDK1147. See docs.
         # https://learn.microsoft.com/dotnet/core/tools/dotnet-restore
@@ -201,8 +77,6 @@ jobs:
 
       - name: Build and publish APK (signed if secrets provided)
         shell: bash
-        env:
-          CSPROJ: ${{ needs.scaffold.outputs.csproj_path }}
         run: |
           set -euo pipefail
           PUBLISH_DIR=./publish
@@ -212,7 +86,7 @@ jobs:
             echo "Keystore secrets detected — producing a signed release APK"
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
-            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
+            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
               -p:AndroidKeyStore=true \
               -p:AndroidSigningKeyStore="${KEYSTORE_PATH}" \
               -p:AndroidSigningStorePass="${KEYSTORE_PASSWORD}" \
@@ -220,7 +94,7 @@ jobs:
               -p:AndroidSigningKeyPass="${KEY_PASSWORD}"
           else
             echo "No keystore provided — producing an unsigned release APK"
-            dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR"
+            dotnet publish "$CSPROJ_PATH" -f net8.0-android -c Release -o "$PUBLISH_DIR"
           fi
 
       - name: Verify and list APK(s)
@@ -242,5 +116,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk-${{ github.run_number }}
+          name: android-apk-${{ github.event.inputs.project_name }}
           path: publish/**/*.apk
