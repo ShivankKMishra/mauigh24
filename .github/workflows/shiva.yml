@@ -1,4 +1,4 @@
-name: Scaffold & Build .NET MAUI (Android)
+name: Scaffold & Build .NET MAUI (Android) on macOS
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ on:
         type: choice
         options: [ "false", "true" ]
 
-# Needed to push the scaffolded code back to the repo
+# Needed to push scaffolded code back to the repo
 permissions:
   contents: write
 
@@ -48,12 +48,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup .NET 8 SDK
+      - name: Setup .NET 8 SDK (macOS)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      # Install only the MAUI *templates* so `dotnet new maui` is available
+      # Install MAUI templates so `dotnet new maui` works without heavy workloads
       - name: Install MAUI templates (.NET 8)
         shell: bash
         run: |
@@ -82,7 +82,7 @@ jobs:
           FORCE_FLAG=""
           [ "${{ github.event.inputs.overwrite_existing }}" = "true" ] && FORCE_FLAG="--force"
 
-          # Create the MAUI app (targets net8.0 frameworks)
+          # Create the MAUI app (targets net8.0)
           dotnet new "${TEMPLATE}" --framework "net8.0" \
             --name "${APP_NAME}" \
             --output "${APP_DIR}" \
@@ -95,7 +95,7 @@ jobs:
           echo "app_dir=${APP_DIR}" >> "$GITHUB_OUTPUT"
           echo "csproj_path=${APP_DIR}/${APP_NAME}.csproj" >> "$GITHUB_OUTPUT"
 
-      - name: Commit scaffolded files
+      - name: Commit scaffolded files (to new branch by default)
         id: commit
         shell: bash
         run: |
@@ -111,12 +111,11 @@ jobs:
             TARGET_BRANCH="scaffold/maui-${SAFE_NAME}"
             git checkout -b "$TARGET_BRANCH"
           fi
-
           git add .
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            # [skip ci] avoids re-triggering workflows on this commit
+            # [skip ci] avoids re-trigger loops
             git commit -m "chore(maui): scaffold ${{ github.event.inputs.template }} project '${{ github.event.inputs.project_name }}' [skip ci]"
             git push origin "$TARGET_BRANCH"
           fi
@@ -127,6 +126,7 @@ jobs:
     runs-on: macos-14
     needs: scaffold
     timeout-minutes: 120
+
     env:
       # Optional signing secrets (add in repo Settings → Secrets and variables → Actions)
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -140,7 +140,8 @@ jobs:
         with:
           ref: ${{ needs.scaffold.outputs.branch }}
           fetch-depth: 0
-      - name: Setup .NET 8 SDK
+
+      - name: Setup .NET 8 SDK (macOS)
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -175,12 +176,12 @@ jobs:
           set -euo pipefail
           dotnet restore "App.sln"
 
-      # Safely derive KEYSTORE_PATH from RUNNER_TEMP (no runner.temp expression issues)
+      # Safely derive KEYSTORE_PATH from RUNNER_TEMP (macOS)
       - name: Set KEYSTORE_PATH from RUNNER_TEMP
         shell: bash
         run: echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Build and publish APK
+      - name: Build and publish APK (signed if secrets provided)
         shell: bash
         env:
           CSPROJ: ${{ needs.scaffold.outputs.csproj_path }}
@@ -191,7 +192,6 @@ jobs:
 
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "Keystore secrets detected — producing a signed release APK"
-            # Use printf to avoid newline; use real '>' redirection (no HTML &gt;)
             printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
 
             dotnet publish "$CSPROJ" -f net8.0-android -c Release -o "$PUBLISH_DIR" \
@@ -213,7 +213,7 @@ jobs:
           if [ "$APK_COUNT" -eq 0 ]; then
             echo "::error::No .apk found in ./publish after build."
             echo "Possible causes:"
-            echo "  • Workload not installed or Android SDK mismatch"
+            echo "  • Workload or Android SDK mismatch"
             echo "  • Project doesn’t target net8.0-android"
             echo "  • Packaging/AOT issues (try: -p:RunAOTCompilation=false)"
             exit 4
