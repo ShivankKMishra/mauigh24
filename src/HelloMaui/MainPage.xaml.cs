@@ -1,24 +1,37 @@
-﻿namespace HelloMaui;
+﻿using System.Net.Http;
+using System.Net.Http.Json;
+
+namespace HelloMaui;
 
 public partial class MainPage : ContentPage
 {
-	int count = 0;
+    private readonly HttpClient _httpClient = new();
 
-	public MainPage()
-	{
-		InitializeComponent();
-	}
+    public MainPage()
+    {
+        InitializeComponent();
+    }
 
-	private void OnCounterClicked(object sender, EventArgs e)
-	{
-		count++;
+    private async void OnCounterClicked(object sender, EventArgs e)
+    {
+        try
+        {
+            string url = "https://fluffy-space-system-7jvw46q9q5phr4v6-5070.app.github.dev/hitmeBro/hitme";
 
-		if (count == 1)
-			CounterBtn.Text = $"Clicked {count} time";
-		else
-			CounterBtn.Text = $"Clicked {count} times";
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; AcmeInc/1.0)");
 
-		SemanticScreenReader.Announce(CounterBtn.Text);
-	}
+            var response = await _httpClient.GetFromJsonAsync<HitMeResponse>(url);
+
+            ApiResponseLabel.Text = $"Response: {response.Message}";
+        }
+        catch (Exception ex)
+        {
+            ApiResponseLabel.Text = $"Error: {ex.Message}";
+        }
+    }
 }
 
+public class HitMeResponse
+{
+    public string Message { get; set; }
+}
