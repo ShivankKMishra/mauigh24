@@ -1,5 +1,4 @@
 ﻿using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace HelloMaui;
@@ -24,6 +23,7 @@ public partial class MainPage : ContentPage
             var rawResponse = await _httpClient.GetStringAsync(url);
             ApiResponseLabel.Text = $"Raw Response: {rawResponse}";
 
+            // ✅ Correct generic syntax
             var response = JsonSerializer.Deserialize<HitMeResponse>(rawResponse);
             ApiResponseLabel.Text = $"Message: {response?.Message}";
         }
