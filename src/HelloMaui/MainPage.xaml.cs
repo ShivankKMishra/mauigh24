@@ -13,22 +13,25 @@ public partial class MainPage : ContentPage
     }
 
     private async void OnCounterClicked(object sender, EventArgs e)
+{
+    try
     {
-        try
-        {
-            string url = "https://fluffy-space-system-7jvw46q9q5phr4v6-5070.app.github.dev/hitmeBro/hitme";
+        string url = "https://fluffy-space-system-7jvw46q9q5phr4v6-5070.app.github.dev/hitmeBro/hitme";
 
-            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; AcmeInc/1.0)");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
 
-            var response = await _httpClient.GetFromJsonAsync<HitMeResponse>(url);
+        var rawResponse = await _httpClient.GetStringAsync(url);
+        ApiResponseLabel.Text = $"Raw Response: {rawResponse}";
 
-            ApiResponseLabel.Text = $"Response: {response.Message}";
-        }
-        catch (Exception ex)
-        {
-            ApiResponseLabel.Text = $"Error: {ex.Message}";
-        }
+        // Optional: Try parsing only if it's valid JSON
+        var response = JsonSerializer.Deserialize<HitMeResponse>(rawResponse);
+        ApiResponseLabel.Text = $"Message: {response?.Message}";
     }
+    catch (Exception ex)
+    {
+        ApiResponseLabel.Text = $"Error: {ex.Message}";
+    }
+}
 }
 
 public class HitMeResponse
