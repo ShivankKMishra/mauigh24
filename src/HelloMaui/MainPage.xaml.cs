@@ -24,8 +24,15 @@ public partial class MainPage : ContentPage
             ApiResponseLabel.Text = $"Raw Response: {rawResponse}";
 
             // ✅ Correct generic syntax
-            var response = JsonSerializer.Deserialize<HitMeResponse>(rawResponse);
-            ApiResponseLabel.Text = $"Message: {response?.Message}";
+            try
+            {
+                var response = JsonSerializer.Deserialize<HitMeResponse>(rawResponse);
+                ApiResponseLabel.Text = $"Message: {response?.Message}";
+            }
+            catch (JsonException jsonEx)
+            {
+                ApiResponseLabel.Text = $"Raw Response (not valid JSON): {rawResponse}";
+            }
         }
         catch (Exception ex)
         {
